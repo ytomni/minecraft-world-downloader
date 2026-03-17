@@ -12,9 +12,11 @@ import base64
 import bz2
 import gzip
 import hashlib
+import io
 import lzma
 import struct
 import sys
+import tarfile
 import zlib
 from dataclasses import dataclass
 from hashlib import sha256
@@ -28,6 +30,8 @@ ROM_END = b"</ROMFILE>"
 ZTE_CFG_MAGIC = b"\x99\x99\x99\x99DDDDUUUU\xaa\xaa\xaa\xaa"
 ZTE_PAYLOAD_MAGIC = 0x01020304
 ZTE_SIGNATURE_MAGIC = 0x04030201
+
+MTK_BACKUP_TABLE = b"a01b2d345.B67c89efghiNjklmnopqrstuvwxyzACDEFGHIJKLMNOPQRSUVWXYZ()+-*/?<>"
 
 TYPE2_KNOWN_KEYS = (
     "MIK@0STzKpB%qJZe",
@@ -179,6 +183,69 @@ def decoder_attempts(data: bytes) -> Iterable[tuple[str, bytes]]:
             continue
         if decoded and decoded != data:
             yield name, decoded
+
+
+def _mtk_table_pos(ch: int) -> int:
+    if ch == ord("a"):
+        return 0
+    idx = MTK_BACKUP_TABLE.find(bytes([ch]))
+    return idx if idx >= 1 else -1
+
+
+def decode_mtk_backup_stream(blob: bytes) -> bytes | None:
+    # MTK/Skyworth backuprestorecmd stream:
+    #   <seed chars mapped with MTK table> '_' <obfuscated bytes>
+    # where each payload byte transform is: out = (seed + 129 - in) & 0xFF
+    if not blob:
+        return None
+
+    max_sep = min(len(blob), 12)
+    for sep in range(1, max_sep):
+        if blob[sep] != 0x5F:  # '_'
+            continue
+
+        seed = 0
+        valid = True
+        for idx, ch in enumerate(blob[:sep]):
+            pos = _mtk_table_pos(ch)
+            if pos < 0:
+                valid = False
+                break
+            seed = 10 * (seed * idx) + pos
+        if not valid:
+            continue
+
+        encoded = blob[sep + 1 :]
+        if not encoded:
+            continue
+        decoded = bytes(((seed + 129 - b) & 0xFF) for b in encoded)
+        return decoded
+
+    return None
+
+
+def decode_tar_members(blob: bytes) -> list[tuple[str, bytes]]:
+    out: list[tuple[str, bytes]] = []
+    try:
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    continue
+                data = extracted.read()
+                if not data:
+                    continue
+
+                out.append((f"tar:{member.name}", data))
+                if member.name.endswith(".tmp"):
+                    decoded = decode_mtk_backup_stream(data)
+                    if decoded:
+                        out.append((f"tar:{member.name}->mtk-backup", decoded))
+    except Exception:
+        return []
+    return out
 
 
 def _be_u32(blob: bytes, offset: int) -> int:
@@ -495,6 +562,13 @@ def decode_search(raw_data: bytes, ctx: DecodeContext) -> tuple[str, bytes] | No
         xml_payload = extract_romfile_xml(blob)
         if xml_payload and looks_like_romfile(xml_payload):
             return source, xml_payload
+
+        mtk_decoded = decode_mtk_backup_stream(blob)
+        if mtk_decoded:
+            queue.append((f"{source}->mtk-backup", mtk_decoded, depth + 1))
+
+        for tar_source, tar_blob in decode_tar_members(blob):
+            queue.append((f"{source}->{tar_source}", tar_blob, depth + 1))
 
         zte_cfg_decoded = decode_zte_cfg_container(blob)
         if zte_cfg_decoded:

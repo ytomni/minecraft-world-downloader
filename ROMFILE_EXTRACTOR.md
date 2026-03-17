@@ -2,7 +2,10 @@
 
 `romfile_cfg_extractor.py` extracts the `<ROMFILE>...</ROMFILE>` XML block from router backup files (for example `romfile.cfg` exports), including files with extra wrapper bytes or common compression layers.
 
-It also includes detection paths for common ZTE backup container/payload formats used by encrypted/compressed exports.
+It also includes detection paths for:
+
+- common ZTE backup container/payload formats used by encrypted/compressed exports
+- MTK/Skyworth `backuprestorecmd` encoded streams (including `.tar.gz` backups containing `.tmp` payloads)
 
 ## Legal / scope
 
@@ -45,6 +48,9 @@ python3 romfile_cfg_extractor.py romfile.cfg --try-xor --max-depth 4
 
 # encrypted ZTE-style payloads (broad key scan)
 python3 romfile_cfg_extractor.py romfile.cfg --try-all-known-keys --max-depth 4
+
+# MTK/Skyworth backup tar/encoded stream
+python3 romfile_cfg_extractor.py romfile.cfg --max-depth 4
 ```
 
 ## Notes
